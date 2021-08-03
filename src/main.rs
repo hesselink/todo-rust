@@ -142,10 +142,7 @@ fn run_command(client: &mut Client, command: Command) {
                         .clone()
                         .eq(typed_query::Constant { value: false })
                 })
-                .order_by(|t| typed_query::Order {
-                    by: Box::new(t.created_time.clone()),
-                    direction: typed_query::Direction::Ascending,
-                })
+                .order_by(|t| typed_query::asc(&t.created_time))
                 .query(client)
             {
                 println!("{}: {}", row.id, row.name);

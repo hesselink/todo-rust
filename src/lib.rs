@@ -186,6 +186,14 @@ pub mod typed_query {
         pub direction: Direction,
     }
 
+    pub fn asc<F: 'static>(field: &F) -> Order where F: SomeField + Clone {
+        Order { by: Box::new((*field).clone()), direction: Direction::Ascending }
+    }
+
+    pub fn desc<F: 'static>(field: &F) -> Order where F: SomeField + Clone {
+        Order { by: Box::new((*field).clone()), direction: Direction::Descending }
+    }
+
     impl ToSql for Order {
         fn to_sql(&self) -> String {
             self.by.to_sql() + " " + &self.direction.to_sql()
