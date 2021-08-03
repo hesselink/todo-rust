@@ -195,8 +195,8 @@ pub mod typed_query {
     impl ToSql for Direction {
         fn to_sql(&self) -> String {
             match self {
-                Ascending => "asc".to_string(),
-                Descending => "desc".to_string(),
+                Direction::Ascending => "asc".to_string(),
+                Direction::Descending => "desc".to_string(),
             }
         }
     }
