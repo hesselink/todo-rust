@@ -1,6 +1,9 @@
-use postgres::{Client, NoTls};
+use postgres::{Client, NoTls, Row};
 use std::env;
+use std::marker::PhantomData;
 use std::time::SystemTime;
+
+use todo_rust::typed_query;
 
 fn main() {
     let mut client =
@@ -18,6 +21,61 @@ fn main() {
             run_command(&mut client, cmd);
         }
     }
+}
+
+struct TodoRecord {
+    id: i32,
+    name: String,
+    created_time: SystemTime,
+    completed: bool,
+    completed_time: SystemTime,
+}
+
+impl typed_query::FromRow for TodoRecord {
+    fn from_row(row: Row) -> TodoRecord {
+        TodoRecord {
+            id: row.get(0),
+            name: row.get(1),
+            created_time: row.get(2),
+            completed: row.get(3),
+            completed_time: row.get(4),
+        }
+    }
+}
+
+const TODO_TABLE: typed_query::Table<TodoColumns, TodoRecord> = typed_query::Table {
+    name: "todo",
+    columns: TodoColumns {
+        id: typed_query::Field {
+            name: "id",
+            phantom: PhantomData,
+        },
+        name: typed_query::Field {
+            name: "name",
+            phantom: PhantomData,
+        },
+        created_time: typed_query::Field {
+            name: "created_time",
+            phantom: PhantomData,
+        },
+        completed: typed_query::Field {
+            name: "completed",
+            phantom: PhantomData,
+        },
+        completed_time: typed_query::Field {
+            name: "completed_time",
+            phantom: PhantomData,
+        },
+    },
+    phantom: PhantomData,
+};
+
+struct TodoColumns {
+    id: typed_query::Field<i32>,
+    name: typed_query::Field<String>,
+    created_time: typed_query::Field<SystemTime>,
+    completed: typed_query::Field<bool>,
+    completed_time: typed_query::Field<SystemTime>,
 }
 
 fn create_tables(client: &mut Client) {
@@ -78,16 +136,19 @@ fn run_command(client: &mut Client, command: Command) {
                 .unwrap();
         }
         Command::List => {
-            for row in client
-                .query(
-                    "select id, name from todo where not completed order by created_time asc",
-                    &[],
-                )
-                .unwrap()
+            for row in typed_query::from(TODO_TABLE)
+                .where_(|t| {
+                    t.completed
+                        .clone()
+                        .eq(typed_query::Constant { value: false })
+                })
+                .order_by(|t| typed_query::Order {
+                    by: Box::new(t.created_time.clone()),
+                    direction: typed_query::Direction::Ascending,
+                })
+                .query(client)
             {
-                let id: i32 = row.get(0);
-                let name: &str = row.get(1);
-                println!("{}: {}", id, name);
+                println!("{}: {}", row.id, row.name);
             }
         }
         Command::Complete { id } => {
