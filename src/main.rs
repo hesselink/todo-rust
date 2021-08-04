@@ -23,12 +23,22 @@ fn main() {
     }
 }
 
+#[allow(dead_code)]
 struct TodoRecord {
     id: i32,
     name: String,
     created_time: SystemTime,
     completed: bool,
-    completed_time: SystemTime,
+    completed_time: Option<SystemTime>,
+}
+
+#[allow(dead_code)]
+struct TodoRecordInsert {
+    id: typed_query::WithDefault<i32>,
+    name: String,
+    created_time: typed_query::WithDefault<SystemTime>,
+    completed: typed_query::WithDefault<bool>,
+    completed_time: Option<SystemTime>,
 }
 
 impl typed_query::FromRow for TodoRecord {
@@ -40,6 +50,18 @@ impl typed_query::FromRow for TodoRecord {
             completed: row.get(3),
             completed_time: row.get(4),
         }
+    }
+}
+
+impl typed_query::ToSqlParams for TodoRecordInsert {
+    fn to_sql_params(self) -> Vec<typed_query::Param> {
+        let mut v: Vec<typed_query::Param> = Vec::new();
+        v.push(typed_query::Param(Box::new(self.id)));
+        v.push(typed_query::Param(Box::new(self.name)));
+        v.push(typed_query::Param(Box::new(self.created_time)));
+        v.push(typed_query::Param(Box::new(self.completed)));
+        v.push(typed_query::Param(Box::new(self.completed_time)));
+        v
     }
 }
 
@@ -70,6 +92,7 @@ const TODO_TABLE: typed_query::Table<TodoColumns, TodoRecord> = typed_query::Tab
     phantom: PhantomData,
 };
 
+#[allow(dead_code)]
 struct TodoColumns {
     id: typed_query::Field<i32>,
     name: typed_query::Field<String>,
@@ -131,9 +154,15 @@ fn print_usage() {
 fn run_command(client: &mut Client, command: Command) {
     match command {
         Command::Add { name } => {
-            client
-                .execute("insert into todo (name) values ($1)", &[&name])
-                .unwrap();
+            typed_query::insert_into(TODO_TABLE)
+                .values(TodoRecordInsert { // TODO make a default value for this?
+                    id: typed_query::WithDefault::Default,
+                    name,
+                    created_time: typed_query::WithDefault::Default,
+                    completed: typed_query::WithDefault::Default,
+                    completed_time: Option::None,
+                })
+                .execute(client);
         }
         Command::List => {
             for row in typed_query::from(TODO_TABLE)

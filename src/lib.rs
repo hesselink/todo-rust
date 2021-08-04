@@ -1,4 +1,6 @@
 pub mod typed_query {
+    use postgres::types::private::BytesMut;
+    use postgres::types::{IsNull, Type};
     use postgres::{Client, Row};
     use std::marker::PhantomData;
 
@@ -39,6 +41,62 @@ pub mod typed_query {
         Query::Table { table }
     }
 
+    pub struct Insert<C, R: FromRow> {
+        table: Table<C, R>,
+        values: InsertParams,
+    }
+
+    #[derive(Debug)]
+    pub enum WithDefault<T> {
+        Value(T),
+        Default,
+    }
+
+    impl<T> postgres::types::ToSql for WithDefault<T>
+    where
+        T: postgres::types::ToSql + std::fmt::Debug,
+    {
+        fn to_sql(
+            &self,
+            ty: &Type,
+            out: &mut BytesMut,
+        ) -> Result<IsNull, Box<(dyn std::error::Error + Send + Sync + 'static)>> {
+            match self {
+                WithDefault::Value(v) => v.to_sql(ty, out),
+                // Should be filtered out of the list of params instead, since we can't send the
+                // default value as a parameter value with the libpq format.
+                WithDefault::Default => panic!("should never write a default value to sql"),
+            }
+        }
+        fn accepts(ty: &Type) -> bool {
+            T::accepts(ty)
+        }
+
+        postgres::types::to_sql_checked!();
+    }
+
+    pub struct InsertParams(Vec<Vec<Param>>);
+
+    pub trait IsParam: postgres::types::ToSql + IsDefault {
+        fn as_dyn_to_sql(&self) -> &(dyn postgres::types::ToSql + Sync);
+    }
+
+    impl<T: Sized + postgres::types::ToSql + IsDefault + Sync> IsParam for T {
+        fn as_dyn_to_sql(&self) -> &(dyn postgres::types::ToSql + Sync) {
+            self
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Param(pub Box<dyn IsParam + Sync>);
+
+    pub fn insert_into<C, R: FromRow>(table: Table<C, R>) -> Insert<C, R> {
+        Insert {
+            table,
+            values: InsertParams(Vec::new()),
+        }
+    }
+
     impl<C, R: FromRow> Query<C, R> {
         pub fn columns(&self) -> &C {
             match self {
@@ -55,7 +113,6 @@ pub mod typed_query {
             let mut vec: Vec<R> = Vec::new();
 
             let q = &self.to_sql();
-            print!("Executing query: {}", q);
             for row in client.query(q.as_str(), &[]).unwrap() {
                 vec.push(FromRow::from_row(row));
             }
@@ -85,20 +142,51 @@ pub mod typed_query {
         }
     }
 
+    impl<C, R: FromRow> Insert<C, R> {
+        pub fn values<V: ToSqlParams>(self, v: V) -> Self {
+            let vs = v.to_sql_params();
+            let InsertParams(mut values) = self.values;
+            values.push(vs);
+            Insert {
+                table: self.table,
+                values: InsertParams(values),
+            }
+        }
+
+        pub fn execute(&self, client: &mut Client) {
+            let q = &self.to_sql();
+            let InsertParams(vss) = &self.values;
+            let mut ps: Vec<&(dyn postgres::types::ToSql + Sync)> = Vec::new();
+            for vs in vss {
+                for Param(v) in vs {
+                    if !(*v).is_default() {
+                        let v_: &(dyn postgres::types::ToSql + Sync) = (&**v).as_dyn_to_sql();
+                        ps.push(v_);
+                    }
+                }
+            }
+            client.execute(q.as_str(), &*ps).unwrap();
+        }
+    }
+
     pub trait ToSql {
         fn to_sql(&self) -> String;
     }
 
     impl<C, R: FromRow> ToSql for Table<C, R> {
         fn to_sql(&self) -> String {
-            format!("select * from {}", self.name) // TODO column names
+            self.name.to_string()
         }
     }
 
     impl<C, R: FromRow> ToSql for Query<C, R> {
         fn to_sql(&self) -> String {
             match self {
-                Query::Table { table } => table.to_sql(),
+                Query::Table { table } => format!(
+                    // TODO column names
+                    "select * from {}",
+                    table.to_sql()
+                ),
                 Query::Where { query, predicate } => format!(
                     "select * from ({}) t where {}", // TODO unique number on alias
                     query.to_sql(),
@@ -112,6 +200,58 @@ pub mod typed_query {
             }
         }
     }
+
+    impl<C, R: FromRow> ToSql for Insert<C, R> {
+        fn to_sql(&self) -> String {
+            "insert into ".to_string() + &self.table.to_sql() + " values " + &self.values.to_sql()
+        }
+    }
+
+    impl ToSql for InsertParams {
+        fn to_sql(&self) -> String {
+            let InsertParams(vss) = self;
+            let mut ix = 1;
+            let mut sql_str = String::new();
+            for (i, vs) in vss.iter().enumerate() {
+                if i > 0 {
+                    sql_str.push_str(", ")
+                }
+                sql_str.push_str("(");
+                for (j, Param(v)) in vs.iter().enumerate() {
+                    if j > 0 {
+                        sql_str.push_str(", ");
+                    }
+                    if (**v).is_default() {
+                        sql_str.push_str("default");
+                    } else {
+                        sql_str.push_str("$");
+                        sql_str.push_str(&ix.to_string());
+                        ix += 1;
+                    }
+                }
+                sql_str.push_str(")");
+            }
+            sql_str
+        }
+    }
+
+    pub trait IsDefault {
+        fn is_default(&self) -> bool {
+            false
+        }
+    }
+
+    impl<T> IsDefault for WithDefault<T> {
+        fn is_default(&self) -> bool {
+            match self {
+                WithDefault::Value(_) => false,
+                WithDefault::Default => true,
+            }
+        }
+    }
+
+    impl IsDefault for String {}
+    impl<T> IsDefault for Option<T> {}
 
     pub trait SomeField: ToSql {}
 
@@ -127,6 +267,10 @@ pub mod typed_query {
         }
     }
 
+    pub trait ToSqlParams {
+        fn to_sql_params(self) -> Vec<Param>;
+    }
+
     impl<T> SomeField for Field<T> {}
 
     impl<T> SomeField for &Field<T> {}
@@ -137,7 +281,7 @@ pub mod typed_query {
 
     impl<T: ToString> ToSql for Constant<T> {
         fn to_sql(&self) -> String {
-            self.value.to_string()
+            self.value.to_string() // TODO escaping/query params
         }
     }
 
@@ -186,12 +330,24 @@ pub mod typed_query {
         pub direction: Direction,
     }
 
-    pub fn asc<F: 'static>(field: &F) -> Order where F: SomeField + Clone {
-        Order { by: Box::new((*field).clone()), direction: Direction::Ascending }
+    pub fn asc<F: 'static>(field: &F) -> Order
+    where
+        F: SomeField + Clone,
+    {
+        Order {
+            by: Box::new((*field).clone()),
+            direction: Direction::Ascending,
+        }
     }
 
-    pub fn desc<F: 'static>(field: &F) -> Order where F: SomeField + Clone {
-        Order { by: Box::new((*field).clone()), direction: Direction::Descending }
+    pub fn desc<F: 'static>(field: &F) -> Order
+    where
+        F: SomeField + Clone,
+    {
+        Order {
+            by: Box::new((*field).clone()),
+            direction: Direction::Descending,
+        }
     }
 
     impl ToSql for Order {
